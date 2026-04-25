@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from pcap_tool import (
     Anonymizer,
     _checksum,
+    _ip_checksum_valid,
     _is_private,
     _is_public_safe,
     _random_public_ip,
@@ -263,6 +264,49 @@ class TestAnonymizer(unittest.TestCase):
         a2 = Anonymizer(seed=99)
         buf = _build_udp_packet("192.168.10.10", "8.8.8.8")
         self.assertEqual(a1.process_packet(buf), a2.process_packet(buf))
+
+    def test_corrupt_checksum_preserved_after_anonymize(self):
+        """If original IP checksum is corrupt, output should also be corrupt."""
+        buf = bytearray(_build_udp_packet("192.168.1.1", "8.8.8.8"))
+        # Corrupt the IP checksum (bytes 24-25 in Ethernet frame = IP header offset 10-11)
+        buf[24] ^= 0xFF
+        buf[25] ^= 0xFF
+        buf = bytes(buf)
+
+        # Confirm it's actually corrupt before we process it
+        eth = dpkt.ethernet.Ethernet(buf)
+        self.assertFalse(_ip_checksum_valid(eth.data), "Pre-condition: checksum should be corrupt")
+
+        result = self.anon.process_packet(buf)
+        eth_out = dpkt.ethernet.Ethernet(result)
+        self.assertFalse(_ip_checksum_valid(eth_out.data),
+                         "Corrupt checksum should remain corrupt after anonymization")
+
+    def test_valid_checksum_stays_valid_after_anonymize(self):
+        """If original IP checksum is valid, output should also be valid."""
+        buf = _build_udp_packet("192.168.1.1", "8.8.8.8")
+        eth = dpkt.ethernet.Ethernet(buf)
+        self.assertTrue(_ip_checksum_valid(eth.data), "Pre-condition: checksum should be valid")
+
+        result = self.anon.process_packet(buf)
+        eth_out = dpkt.ethernet.Ethernet(result)
+        self.assertTrue(_ip_checksum_valid(eth_out.data),
+                        "Valid checksum should remain valid after anonymization")
+
+    def test_corrupt_checksum_differs_from_correct(self):
+        """The corrupt output checksum must not accidentally equal the correct value."""
+        buf = bytearray(_build_udp_packet("10.0.0.1", "8.8.8.8"))
+        buf[24] ^= 0xFF
+        buf[25] ^= 0xFF
+        result = self.anon.process_packet(bytes(buf))
+        eth_out = dpkt.ethernet.Ethernet(result)
+        ip_out = eth_out.data
+        # Compute what the correct checksum would be
+        ip_out_copy = dpkt.ip.IP(bytes(ip_out))
+        ip_out_copy.sum = 0
+        correct = _checksum(bytes(ip_out_copy)[:ip_out_copy.hl * 4])
+        self.assertNotEqual(ip_out.sum, correct,
+                            "Corrupted checksum must not equal the correct checksum")
 
 
 class TestTruncate(unittest.TestCase):

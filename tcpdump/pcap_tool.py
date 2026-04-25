@@ -117,9 +117,24 @@ def _checksum(data: bytes) -> int:
     return ~s & 0xffff
 
 
-def _fix_ip_checksum(ip: dpkt.ip.IP) -> None:
+def _ip_checksum_valid(ip: dpkt.ip.IP) -> bool:
+    """Return True if the IP header checksum is currently correct."""
+    return _checksum(bytes(ip)[:ip.hl * 4]) == 0
+
+
+def _fix_ip_checksum(ip: dpkt.ip.IP, was_valid: bool = True) -> None:
+    """
+    Recompute the IP header checksum.
+    If *was_valid* is False (original was already corrupt), write a checksum
+    that is intentionally wrong — preserving the corrupted nature of the packet.
+    """
     ip.sum = 0
-    ip.sum = _checksum(bytes(ip)[:ip.hl * 4])
+    correct = _checksum(bytes(ip)[:ip.hl * 4])
+    if was_valid:
+        ip.sum = correct
+    else:
+        # XOR the low byte to guarantee the result differs from the correct value
+        ip.sum = correct ^ 0x00FF
 
 
 def _fix_transport_checksum(ip: dpkt.ip.IP) -> None:
@@ -183,6 +198,8 @@ class Anonymizer:
     def _process_ipv4(self, eth: dpkt.ethernet.Ethernet) -> bytes:
         """Rewrite private src/dst IPs in an IPv4 frame; fix checksums."""
         ip = eth.data
+        ip_cksum_was_valid = _ip_checksum_valid(ip)
+
         src_int = int.from_bytes(ip.src, 'big')
         dst_int = int.from_bytes(ip.dst, 'big')
 
@@ -195,7 +212,7 @@ class Anonymizer:
             changed = True
 
         if changed:
-            _fix_ip_checksum(ip)
+            _fix_ip_checksum(ip, was_valid=ip_cksum_was_valid)
             _fix_transport_checksum(ip)
             return bytes(eth)
         return bytes(eth)
