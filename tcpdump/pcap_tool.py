@@ -345,28 +345,30 @@ def truncate_packet(buf: bytes, snap_len: int) -> bytes:
 def process_pcap(
     input_path: str,
     output_path: Optional[str],
-    operation: str,
+    operations: list,
     snap_len: int = 64,
     seed: Optional[int] = None,
-) -> dict[str, str]:
+):
     """
-    Read *input_path*, apply *operation*, write *output_path*.
+    Read *input_path*, apply each operation in *operations* in order,
+    write *output_path*.
 
-    Returns the anonymization mapping dict (empty for truncate).
+    operations: list containing any combination of "anonymize", "truncate"
+    Returns (ip_mapping, mac_mapping, n_packets)
     """
-    anonymizer = Anonymizer(seed=seed) if operation == "anonymize" else None
+    anonymizer = Anonymizer(seed=seed) if "anonymize" in operations else None
 
     with open(input_path, 'rb') as f:
         pcap_reader = dpkt.pcap.Reader(f)
         link_type = pcap_reader.datalink()
 
-        # Collect all processed packets first so we can report stats
-        packets: list[tuple[float, bytes]] = []
+        packets: list = []
         for ts, buf in pcap_reader:
-            if operation == "anonymize":
-                buf = anonymizer.process_packet(buf)
-            elif operation == "truncate":
-                buf = truncate_packet(buf, snap_len)
+            for op in operations:
+                if op == "anonymize":
+                    buf = anonymizer.process_packet(buf)
+                elif op == "truncate":
+                    buf = truncate_packet(buf, snap_len)
             packets.append((ts, buf))
 
     if output_path:
@@ -436,62 +438,70 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    sub = parser.add_subparsers(dest="command", required=True)
 
-    # ---- anonymize ----
-    anon = sub.add_parser(
-        "anonymize",
-        help="Replace private IPv4 addresses with random public IPs",
+    parser.add_argument("input", help="Input .pcap file")
+    parser.add_argument("-o", "--output",
+                        help="Output .pcap file (default: auto-named from operations applied)")
+
+    # ---- operations (at least one required) ----
+    ops = parser.add_argument_group("operations (at least one required)")
+    ops.add_argument(
+        "-a", "--anonymize",
+        action="store_true",
+        help="Replace private IPv4/ARP addresses and MACs with random public ones",
     )
-    anon.add_argument("input", help="Input .pcap file")
-    anon.add_argument("-o", "--output", help="Output .pcap file (default: <input>_anon.pcap)")
-    anon.add_argument(
+    ops.add_argument(
+        "-t", "--truncate",
+        action="store_true",
+        help="Truncate each packet to BYTES (default 64)",
+    )
+
+    # ---- anonymize options ----
+    ao = parser.add_argument_group("anonymize options")
+    ao.add_argument(
         "--map-file",
         metavar="FILE",
         help="Write CSV mapping table to FILE (e.g. mapping.csv)",
     )
-    anon.add_argument(
+    ao.add_argument(
         "--no-map",
         action="store_true",
         help="Suppress the console mapping table",
     )
-    anon.add_argument(
+    ao.add_argument(
         "--seed",
         type=int,
         default=None,
         help="RNG seed for reproducible anonymization",
     )
-    anon.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show mapping without writing output pcap",
-    )
 
-    # ---- truncate ----
-    trunc = sub.add_parser(
-        "truncate",
-        help="Truncate each packet to a fixed size (default 64 bytes)",
-    )
-    trunc.add_argument("input", help="Input .pcap file")
-    trunc.add_argument("-o", "--output", help="Output .pcap file (default: <input>_trunc.pcap)")
-    trunc.add_argument(
+    # ---- truncate options ----
+    to = parser.add_argument_group("truncate options")
+    to.add_argument(
         "-s", "--snap-len",
         type=int,
         default=64,
         metavar="BYTES",
         help="Maximum packet size in bytes (default: 64)",
     )
-    trunc.add_argument(
+
+    # ---- general ----
+    parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Report stats without writing output pcap",
+        help="Show stats/mapping without writing output pcap",
     )
 
     return parser
 
 
-def default_output(input_path: str, suffix: str) -> str:
+def default_output(input_path: str, operations: list) -> str:
     p = Path(input_path)
+    suffix = ""
+    if "anonymize" in operations:
+        suffix += "_anon"
+    if "truncate" in operations:
+        suffix += "_trunc"
     return str(p.with_stem(p.stem + suffix))
 
 
@@ -503,36 +513,48 @@ def main() -> None:
         print(f"[!] Input file not found: {args.input}", file=sys.stderr)
         sys.exit(1)
 
+    # Build ordered operations list: anonymize first, then truncate
+    operations = []
+    if args.anonymize:
+        operations.append("anonymize")
+    if args.truncate:
+        operations.append("truncate")
+
+    if not operations:
+        parser.error("at least one operation is required: -a/--anonymize and/or -t/--truncate")
+
     out_file: Optional[str]
     if args.dry_run:
         out_file = None
         print("[*] Dry-run mode — no output file will be written.")
     elif args.output:
         out_file = args.output
-    elif args.command == "anonymize":
-        out_file = default_output(args.input, "_anon")
     else:
-        out_file = default_output(args.input, "_trunc")
+        out_file = default_output(args.input, operations)
 
-    print(f"[*] Input : {args.input}")
+    ops_label = " + ".join(operations)
+    print(f"[*] Input     : {args.input}")
+    print(f"[*] Operations: {ops_label}")
+    if "truncate" in operations:
+        print(f"[*] Snap-len  : {args.snap_len} bytes")
     if out_file:
-        print(f"[*] Output: {out_file}")
+        print(f"[*] Output    : {out_file}")
 
     # ---- Run ----
     t0 = time.perf_counter()
+    mapping, mac_mapping, n_pkts = process_pcap(
+        args.input,
+        out_file,
+        operations=operations,
+        snap_len=args.snap_len,
+        seed=args.seed,
+    )
+    elapsed = time.perf_counter() - t0
+    print(f"[+] Processed {n_pkts} packets in {elapsed:.3f}s")
 
-    if args.command == "anonymize":
-        mapping, mac_mapping, n_pkts = process_pcap(
-            args.input,
-            out_file,
-            operation="anonymize",
-            seed=args.seed,
-        )
-        elapsed = time.perf_counter() - t0
-        print(f"[+] Processed {n_pkts} packets in {elapsed:.3f}s")
+    if "anonymize" in operations:
         print(f"[+] {len(mapping)} unique private IP(s) anonymized, "
               f"{len(mac_mapping)} unique MAC(s) anonymized")
-
         if not args.no_map:
             if mapping:
                 print("\nIP address mapping:")
@@ -541,20 +563,8 @@ def main() -> None:
                 print("\nMAC address mapping:")
                 print_mac_mapping_table(mac_mapping)
             print()
-
         if args.map_file:
             write_mapping_csv(mapping, mac_mapping, args.map_file)
-
-    elif args.command == "truncate":
-        _, _mac, n_pkts = process_pcap(
-            args.input,
-            out_file,
-            operation="truncate",
-            snap_len=args.snap_len,
-        )
-        elapsed = time.perf_counter() - t0
-        print(f"[+] Processed {n_pkts} packets in {elapsed:.3f}s  "
-              f"(snap-len={args.snap_len} bytes)")
 
     if out_file:
         size = os.path.getsize(out_file)

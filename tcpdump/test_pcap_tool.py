@@ -330,7 +330,7 @@ class TestProcessPcap(unittest.TestCase):
         fd, out_path = tempfile.mkstemp(suffix=".pcap")
         os.close(fd)
         try:
-            mapping, mac_mapping, n = process_pcap(in_path, out_path, "anonymize")
+            mapping, mac_mapping, n = process_pcap(in_path, out_path, operations=["anonymize"])
             self.assertEqual(n, 3)
             self.assertEqual(len(mapping), 3)
             # Verify no private IPs remain in output
@@ -355,7 +355,7 @@ class TestProcessPcap(unittest.TestCase):
         fd, out_path = tempfile.mkstemp(suffix=".pcap")
         os.close(fd)
         try:
-            _, _mac, n = process_pcap(in_path, out_path, "truncate", snap_len=64)
+            _, _mac, n = process_pcap(in_path, out_path, operations=["truncate"], snap_len=64)
             self.assertEqual(n, 2)
             with open(out_path, 'rb') as f:
                 reader = dpkt.pcap.Reader(f)
@@ -369,11 +369,43 @@ class TestProcessPcap(unittest.TestCase):
         pkts = [_build_udp_packet("192.168.1.1", "8.8.8.8")]
         in_path = self._make_pcap(pkts)
         try:
-            mapping, mac_mapping, n = process_pcap(in_path, None, "anonymize")
+            mapping, mac_mapping, n = process_pcap(in_path, None, operations=["anonymize"])
             self.assertEqual(n, 1)
             self.assertEqual(len(mapping), 1)
         finally:
             os.unlink(in_path)
+
+    def test_anonymize_and_truncate_combined(self):
+        """Both operations applied: output should be anonymized AND truncated."""
+        pkts = [
+            _build_udp_packet("192.168.1.1", "8.8.8.8", payload=b"X" * 300),
+            _build_tcp_packet("10.0.0.5", "4.4.4.4", payload=b"Y" * 400),
+        ]
+        in_path = self._make_pcap(pkts)
+        fd, out_path = tempfile.mkstemp(suffix=".pcap")
+        os.close(fd)
+        try:
+            mapping, mac_mapping, n = process_pcap(
+                in_path, out_path,
+                operations=["anonymize", "truncate"],
+                snap_len=64,
+            )
+            self.assertEqual(n, 2)
+            self.assertGreater(len(mapping), 0)
+            with open(out_path, 'rb') as f:
+                reader = dpkt.pcap.Reader(f)
+                for _, buf in reader:
+                    # Truncated
+                    self.assertLessEqual(len(buf), 64)
+                    # Anonymized
+                    eth = dpkt.ethernet.Ethernet(buf)
+                    if isinstance(eth.data, dpkt.ip.IP):
+                        ip = eth.data
+                        src = int.from_bytes(ip.src, 'big')
+                        self.assertFalse(_is_private(src))
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
 
 
 class TestOutputHelpers(unittest.TestCase):
@@ -544,7 +576,7 @@ class TestArpAnonymizer(unittest.TestCase):
         fd, out_path = tempfile.mkstemp(suffix=".pcap")
         os.close(fd)
         try:
-            mapping, mac_mapping, n = process_pcap(in_path, out_path, "anonymize")
+            mapping, mac_mapping, n = process_pcap(in_path, out_path, operations=["anonymize"])
             self.assertEqual(n, 2)
             self.assertGreater(len(mapping), 0)
             self.assertGreater(len(mac_mapping), 0)
