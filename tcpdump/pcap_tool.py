@@ -196,9 +196,13 @@ class Anonymizer:
     # ------------------------------------------------------------ packets --
 
     def _process_ipv4(self, eth: dpkt.ethernet.Ethernet) -> bytes:
-        """Rewrite private src/dst IPs in an IPv4 frame; fix checksums."""
+        """Rewrite private src/dst IPs and Ethernet MACs in an IPv4 frame; fix checksums."""
         ip = eth.data
         ip_cksum_was_valid = _ip_checksum_valid(ip)
+
+        # Always anonymize Ethernet MACs (they identify physical devices)
+        eth.src = self.translate_mac(eth.src)
+        eth.dst = self.translate_mac(eth.dst)
 
         src_int = int.from_bytes(ip.src, 'big')
         dst_int = int.from_bytes(ip.dst, 'big')
@@ -214,7 +218,6 @@ class Anonymizer:
         if changed:
             _fix_ip_checksum(ip, was_valid=ip_cksum_was_valid)
             _fix_transport_checksum(ip)
-            return bytes(eth)
         return bytes(eth)
 
     def _process_arp(self, eth: dpkt.ethernet.Ethernet) -> bytes:

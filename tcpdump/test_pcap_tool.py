@@ -201,12 +201,48 @@ class TestAnonymizer(unittest.TestCase):
         self.assertTrue(_is_public_safe(str_to_inet(dst_str)))
 
     def test_public_addr_unchanged(self):
+        """Public IPs should not be rewritten; MACs are always anonymized."""
         buf = _build_udp_packet("1.2.3.4", "5.6.7.8")
         result = self.anon.process_packet(buf)
         eth = dpkt.ethernet.Ethernet(result)
         ip = eth.data
         self.assertEqual(inet_to_str(int.from_bytes(ip.src, 'big')), "1.2.3.4")
         self.assertEqual(inet_to_str(int.from_bytes(ip.dst, 'big')), "5.6.7.8")
+
+    def test_ipv4_eth_macs_anonymized(self):
+        """Ethernet src/dst MACs should always be anonymized on IPv4 frames."""
+        original_src_mac = b'\x00\x11\x22\x33\x44\x55'
+        original_dst_mac = b'\x66\x77\x88\x99\xaa\xbb'
+        buf = _build_udp_packet("192.168.1.1", "8.8.8.8")
+        eth_in = dpkt.ethernet.Ethernet(buf)
+        self.assertEqual(eth_in.src, original_src_mac)
+        self.assertEqual(eth_in.dst, original_dst_mac)
+
+        result = self.anon.process_packet(buf)
+        eth_out = dpkt.ethernet.Ethernet(result)
+        self.assertNotEqual(eth_out.src, original_src_mac, "Ethernet src MAC should be anonymized")
+        self.assertNotEqual(eth_out.dst, original_dst_mac, "Ethernet dst MAC should be anonymized")
+        # Should be locally-administered unicast
+        self.assertEqual(eth_out.src[0] & 0x01, 0)
+        self.assertEqual(eth_out.src[0] & 0x02, 2)
+
+    def test_ipv4_mac_in_mapping(self):
+        """MACs from IPv4 frames should appear in mac_mapping."""
+        buf = _build_udp_packet("192.168.1.1", "8.8.8.8")
+        self.anon.process_packet(buf)
+        mm = self.anon.mac_mapping
+        self.assertIn('00:11:22:33:44:55', mm)
+        self.assertIn('66:77:88:99:aa:bb', mm)
+
+    def test_ipv4_mac_stable_across_packets(self):
+        """Same MAC appearing in multiple packets maps to the same replacement."""
+        buf1 = _build_udp_packet("192.168.1.1", "8.8.8.8")
+        buf2 = _build_udp_packet("192.168.1.2", "8.8.8.8")  # same MACs, different IPs
+        r1 = self.anon.process_packet(buf1)
+        r2 = self.anon.process_packet(buf2)
+        self.assertEqual(dpkt.ethernet.Ethernet(r1).src,
+                         dpkt.ethernet.Ethernet(r2).src,
+                         "Same original MAC should always map to the same replacement")
 
     def test_stable_mapping(self):
         buf = _build_udp_packet("192.168.5.5", "8.8.8.8")
