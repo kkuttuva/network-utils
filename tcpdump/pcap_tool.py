@@ -22,6 +22,7 @@ import struct
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 import dpkt
 
@@ -66,7 +67,7 @@ def _is_public_safe(addr_int: int) -> bool:
     return not any(addr in net for net in _PUBLIC_EXCLUDE)
 
 
-def _random_public_ip(existing: set, rng: random.Random | None = None) -> int:
+def _random_public_ip(existing: set, rng: Optional[random.Random] = None) -> int:
     """Generate a random public IPv4 address not already in *existing*."""
     _rng = rng or random
     for _ in range(100_000):
@@ -150,7 +151,7 @@ class Anonymizer:
     The Ethernet src/dst is kept consistent with the inner ARP sender/target MACs.
     """
 
-    def __init__(self, seed: int | None = None):
+    def __init__(self, seed: Optional[int] = None):
         self._rng = random.Random(seed)  # isolated RNG; seed=None → random
         self._ip_map: dict[int, int] = {}    # private_int → public_int
         self._used_public: set = set()
@@ -343,10 +344,10 @@ def truncate_packet(buf: bytes, snap_len: int) -> bytes:
 
 def process_pcap(
     input_path: str,
-    output_path: str | None,
+    output_path: Optional[str],
     operation: str,
     snap_len: int = 64,
-    seed: int | None = None,
+    seed: Optional[int] = None,
 ) -> dict[str, str]:
     """
     Read *input_path*, apply *operation*, write *output_path*.
@@ -502,7 +503,7 @@ def main() -> None:
         print(f"[!] Input file not found: {args.input}", file=sys.stderr)
         sys.exit(1)
 
-    out_file: str | None
+    out_file: Optional[str]
     if args.dry_run:
         out_file = None
         print("[*] Dry-run mode — no output file will be written.")
