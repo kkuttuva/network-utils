@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# socklatency — eBPF Socket Turnaround Latency Monitor
+# Wrapper script that sets PYTHONPATH and ensures root.
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Ensure system BCC is found before pip's fake 'bcc'
+export PYTHONPATH="/usr/lib/python3/dist-packages:${PYTHONPATH:-}"
+
+if [[ $EUID -ne 0 ]]; then
+    echo "socklatency requires root. Re-running with sudo..."
+    exec sudo -E PYTHONPATH="$PYTHONPATH" python3 "$SCRIPT_DIR/socklatency.py" "$@"
+else
+    exec python3 "$SCRIPT_DIR/socklatency.py" "$@"
+fi
